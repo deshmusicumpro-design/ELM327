@@ -1,0 +1,792 @@
+name: Build ELM327 APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          mkdir -p app/src/main/java/ru/elm327/reader
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "ELM327Reader"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id "com.android.application" version "8.7.3" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id "com.android.application"
+          }
+
+          android {
+              namespace "ru.elm327.reader"
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "ru.elm327.reader"
+                  minSdk 23
+                  targetSdk 35
+                  versionCode 1
+                  versionName "0.1"
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+
+              <application
+                  android:allowBackup="false"
+                  android:label="ELM327 Reader"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:usesCleartextTraffic="true">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+
+                  </activity>
+
+              </application>
+
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/ru/elm327/reader/MainActivity.java <<'EOF'
+          package ru.elm327.reader;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.graphics.Typeface;
+          import android.view.View;
+          import android.widget.*;
+
+          import java.io.*;
+          import java.net.*;
+          import java.nio.charset.StandardCharsets;
+          import java.util.Locale;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          public class MainActivity extends Activity {
+
+              EditText ip;
+              EditText port;
+              EditText command;
+
+              TextView status;
+              TextView rpm;
+              TextView speed;
+              TextView coolant;
+              TextView vin;
+              TextView dtc;
+              TextView log;
+
+              Socket socket;
+              InputStream input;
+              OutputStream output;
+
+              ExecutorService executor =
+                      Executors.newSingleThreadExecutor();
+
+              Handler ui =
+                      new Handler(Looper.getMainLooper());
+
+              @Override
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+
+                  ScrollView scroll = new ScrollView(this);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(30,30,30,30);
+
+                  scroll.addView(root);
+
+                  TextView title = new TextView(this);
+                  title.setText("ELM327 Reader");
+                  title.setTextSize(28);
+                  title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+
+                  root.addView(title);
+
+                  TextView info = new TextView(this);
+                  info.setText(
+                      "Диагностика автомобиля через Wi-Fi ELM327\n" +
+                      "Read-only режим"
+                  );
+
+                  root.addView(info);
+
+                  ip = new EditText(this);
+                  ip.setHint("IP ELM327");
+                  ip.setText("192.168.0.10");
+
+                  root.addView(ip);
+
+                  port = new EditText(this);
+                  port.setHint("TCP порт");
+                  port.setText("35000");
+
+                  root.addView(port);
+
+                  Button connect = new Button(this);
+                  connect.setText("ПОДКЛЮЧИТЬСЯ");
+
+                  root.addView(connect);
+
+                  Button init = new Button(this);
+                  init.setText("ИНИЦИАЛИЗИРОВАТЬ ELM327");
+
+                  root.addView(init);
+
+                  status = text("Статус: отключено");
+                  root.addView(status);
+
+                  rpm = text("Обороты двигателя: —");
+                  speed = text("Скорость: —");
+                  coolant = text("Температура ОЖ: —");
+
+                  root.addView(rpm);
+                  root.addView(speed);
+                  root.addView(coolant);
+
+                  Button live = new Button(this);
+                  live.setText("ПРОЧИТАТЬ ПАРАМЕТРЫ");
+
+                  root.addView(live);
+
+                  vin = text("VIN: —");
+                  root.addView(vin);
+
+                  Button readVin = new Button(this);
+                  readVin.setText("ПРОЧИТАТЬ VIN");
+
+                  root.addView(readVin);
+
+                  dtc = text("Ошибки: —");
+                  root.addView(dtc);
+
+                  Button errors = new Button(this);
+                  errors.setText("ПРОЧИТАТЬ ОШИБКИ");
+
+                  root.addView(errors);
+
+                  command = new EditText(this);
+                  command.setHint("Команда: ATI, 0100, 22F190...");
+                  root.addView(command);
+
+                  Button send = new Button(this);
+                  send.setText("ОТПРАВИТЬ КОМАНДУ");
+
+                  root.addView(send);
+
+                  TextView warning = text(
+                      "\nРазрешено только чтение.\n" +
+                      "Команды записи, кодирования и удаления ошибок " +
+                      "блокируются приложением.\n"
+                  );
+
+                  root.addView(warning);
+
+                  log = text("");
+                  log.setTypeface(Typeface.MONOSPACE);
+                  log.setTextIsSelectable(true);
+
+                  root.addView(log);
+
+                  connect.setOnClickListener(v -> connect());
+
+                  init.setOnClickListener(v ->
+                      commands(new String[] {
+                          "ATZ",
+                          "ATE0",
+                          "ATL0",
+                          "ATS0",
+                          "ATH0",
+                          "ATSP0",
+                          "ATI",
+                          "ATDP",
+                          "0100"
+                      })
+                  );
+
+                  live.setOnClickListener(v ->
+                      readLive()
+                  );
+
+                  readVin.setOnClickListener(v ->
+                      readVIN()
+                  );
+
+                  errors.setOnClickListener(v ->
+                      readErrors()
+                  );
+
+                  send.setOnClickListener(v ->
+                      terminal()
+                  );
+
+                  setContentView(scroll);
+              }
+
+              TextView text(String value) {
+                  TextView t = new TextView(this);
+                  t.setText(value);
+                  t.setTextSize(16);
+                  t.setPadding(0,12,0,12);
+                  return t;
+              }
+
+              void connect() {
+
+                  status.setText("Статус: подключение...");
+
+                  executor.execute(() -> {
+
+                      try {
+
+                          socket = new Socket();
+
+                          socket.connect(
+                              new InetSocketAddress(
+                                  ip.getText().toString().trim(),
+                                  Integer.parseInt(
+                                      port.getText().toString().trim()
+                                  )
+                              ),
+                              5000
+                          );
+
+                          socket.setSoTimeout(600);
+
+                          input = socket.getInputStream();
+                          output = socket.getOutputStream();
+
+                          ui.post(() -> {
+
+                              status.setText(
+                                  "Статус: ELM327 подключен"
+                              );
+
+                              addLog("TCP соединение установлено");
+                          });
+
+                      } catch(Exception e) {
+
+                          ui.post(() -> {
+
+                              status.setText(
+                                  "Ошибка подключения"
+                              );
+
+                              addLog(
+                                  "ERROR: " + e.getMessage()
+                              );
+                          });
+                      }
+                  });
+              }
+
+              void commands(String[] list) {
+
+                  executor.execute(() -> {
+
+                      for(String cmd : list) {
+
+                          try {
+
+                              String response =
+                                  sendCommand(cmd);
+
+                              ui.post(() -> {
+
+                                  addLog("→ " + cmd);
+                                  addLog("← " + response);
+                              });
+
+                          } catch(Exception e) {
+
+                              ui.post(() ->
+                                  addLog(
+                                      "ERROR: " +
+                                      e.getMessage()
+                                  )
+                              );
+                          }
+                      }
+                  });
+              }
+
+              String sendCommand(String cmd)
+                      throws Exception {
+
+                  if(socket == null ||
+                     !socket.isConnected()) {
+
+                      throw new Exception(
+                          "ELM327 не подключен"
+                      );
+                  }
+
+                  while(input.available() > 0)
+                      input.read();
+
+                  output.write(
+                      (cmd + "\r")
+                      .getBytes(
+                          StandardCharsets.US_ASCII
+                      )
+                  );
+
+                  output.flush();
+
+                  long timeout =
+                      System.currentTimeMillis() +
+                      5000;
+
+                  ByteArrayOutputStream buffer =
+                      new ByteArrayOutputStream();
+
+                  while(
+                      System.currentTimeMillis()
+                      < timeout
+                  ) {
+
+                      try {
+
+                          int b = input.read();
+
+                          if(b == '>') break;
+
+                          if(b >= 0)
+                              buffer.write(b);
+
+                      } catch(
+                          SocketTimeoutException e
+                      ) {
+                      }
+                  }
+
+                  return buffer
+                      .toString("US-ASCII")
+                      .replace("\r","\n")
+                      .trim();
+              }
+
+              void readLive() {
+
+                  executor.execute(() -> {
+
+                      try {
+
+                          String r1 =
+                              sendCommand("010C");
+
+                          String r2 =
+                              sendCommand("010D");
+
+                          String r3 =
+                              sendCommand("0105");
+
+                          final String rpmValue =
+                              parseRPM(r1);
+
+                          final String speedValue =
+                              parseSpeed(r2);
+
+                          final String tempValue =
+                              parseTemp(r3);
+
+                          ui.post(() -> {
+
+                              rpm.setText(
+                                  "Обороты двигателя: " +
+                                  rpmValue
+                              );
+
+                              speed.setText(
+                                  "Скорость: " +
+                                  speedValue
+                              );
+
+                              coolant.setText(
+                                  "Температура ОЖ: " +
+                                  tempValue
+                              );
+
+                              addLog("010C: " + r1);
+                              addLog("010D: " + r2);
+                              addLog("0105: " + r3);
+                          });
+
+                      } catch(Exception e) {
+
+                          ui.post(() ->
+                              addLog(
+                                  "ERROR: " +
+                                  e.getMessage()
+                              )
+                          );
+                      }
+                  });
+              }
+
+              void readVIN() {
+
+                  executor.execute(() -> {
+
+                      try {
+
+                          String response =
+                              sendCommand("0902");
+
+                          ui.post(() -> {
+
+                              vin.setText(
+                                  "VIN raw: " +
+                                  response
+                              );
+
+                              addLog(
+                                  "0902: " +
+                                  response
+                              );
+                          });
+
+                      } catch(Exception e) {
+
+                          ui.post(() ->
+                              addLog(
+                                  "ERROR: " +
+                                  e.getMessage()
+                              )
+                          );
+                      }
+                  });
+              }
+
+              void readErrors() {
+
+                  executor.execute(() -> {
+
+                      try {
+
+                          String response =
+                              sendCommand("03");
+
+                          ui.post(() -> {
+
+                              dtc.setText(
+                                  "Ошибки raw: " +
+                                  response
+                              );
+
+                              addLog(
+                                  "03: " +
+                                  response
+                              );
+                          });
+
+                      } catch(Exception e) {
+
+                          ui.post(() ->
+                              addLog(
+                                  "ERROR: " +
+                                  e.getMessage()
+                              )
+                          );
+                      }
+                  });
+              }
+
+              void terminal() {
+
+                  String cmd =
+                      command.getText()
+                      .toString()
+                      .trim()
+                      .toUpperCase(Locale.US)
+                      .replace(" ","");
+
+                  if(cmd.length() == 0)
+                      return;
+
+                  if(!allowed(cmd)) {
+
+                      Toast.makeText(
+                          this,
+                          "Команда изменения заблокирована",
+                          Toast.LENGTH_LONG
+                      ).show();
+
+                      addLog(
+                          "BLOCKED: " + cmd
+                      );
+
+                      return;
+                  }
+
+                  executor.execute(() -> {
+
+                      try {
+
+                          String response =
+                              sendCommand(cmd);
+
+                          ui.post(() -> {
+
+                              addLog("→ " + cmd);
+                              addLog("← " + response);
+                          });
+
+                      } catch(Exception e) {
+
+                          ui.post(() ->
+                              addLog(
+                                  "ERROR: " +
+                                  e.getMessage()
+                              )
+                          );
+                      }
+                  });
+              }
+
+              boolean allowed(String cmd) {
+
+                  if(cmd.startsWith("AT"))
+                      return true;
+
+                  if(cmd.startsWith("01"))
+                      return true;
+
+                  if(cmd.equals("03"))
+                      return true;
+
+                  if(cmd.startsWith("09"))
+                      return true;
+
+                  if(cmd.startsWith("22"))
+                      return true;
+
+                  return false;
+              }
+
+              String clean(String s) {
+
+                  return s
+                      .toUpperCase(Locale.US)
+                      .replaceAll(
+                          "[^0-9A-F]",
+                          ""
+                      );
+              }
+
+              String parseRPM(String s) {
+
+                  String h = clean(s);
+
+                  int p = h.indexOf("410C");
+
+                  if(p < 0 ||
+                     h.length() < p + 8)
+                      return "нет данных";
+
+                  try {
+
+                      int A =
+                          Integer.parseInt(
+                              h.substring(
+                                  p+4,
+                                  p+6
+                              ),
+                              16
+                          );
+
+                      int B =
+                          Integer.parseInt(
+                              h.substring(
+                                  p+6,
+                                  p+8
+                              ),
+                              16
+                          );
+
+                      return (
+                          ((A * 256) + B) / 4
+                      ) + " об/мин";
+
+                  } catch(Exception e) {
+
+                      return "ошибка";
+                  }
+              }
+
+              String parseSpeed(String s) {
+
+                  String h = clean(s);
+
+                  int p = h.indexOf("410D");
+
+                  if(p < 0 ||
+                     h.length() < p + 6)
+                      return "нет данных";
+
+                  try {
+
+                      int A =
+                          Integer.parseInt(
+                              h.substring(
+                                  p+4,
+                                  p+6
+                              ),
+                              16
+                          );
+
+                      return A + " км/ч";
+
+                  } catch(Exception e) {
+
+                      return "ошибка";
+                  }
+              }
+
+              String parseTemp(String s) {
+
+                  String h = clean(s);
+
+                  int p = h.indexOf("4105");
+
+                  if(p < 0 ||
+                     h.length() < p + 6)
+                      return "нет данных";
+
+                  try {
+
+                      int A =
+                          Integer.parseInt(
+                              h.substring(
+                                  p+4,
+                                  p+6
+                              ),
+                              16
+                          );
+
+                      return (
+                          A - 40
+                      ) + " °C";
+
+                  } catch(Exception e) {
+
+                      return "ошибка";
+                  }
+              }
+
+              void addLog(String value) {
+
+                  String old =
+                      log.getText().toString();
+
+                  log.setText(
+                      old +
+                      (old.length() == 0
+                          ? ""
+                          : "\n") +
+                      value
+                  );
+              }
+
+              @Override
+              protected void onDestroy() {
+
+                  try {
+                      if(socket != null)
+                          socket.close();
+                  } catch(Exception e) {
+                  }
+
+                  executor.shutdownNow();
+
+                  super.onDestroy();
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk ELM327Reader.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ELM327Reader
+          path: ELM327Reader.apk
+          if-no-files-found: error
