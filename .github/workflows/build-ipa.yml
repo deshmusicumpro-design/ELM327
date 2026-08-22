@@ -1,0 +1,291 @@
+name: Build ELM327 iOS IPA V3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/build-ipa.yml"]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+
+      - name: Generate project
+        run: |
+          mkdir -p ELM327Recon
+
+          cat > project.yml <<'EOF'
+          name: ELM327Recon
+          options:
+            bundleIdPrefix: ru.elm327recon
+          settings:
+            base:
+              SWIFT_VERSION: 5.0
+              IPHONEOS_DEPLOYMENT_TARGET: 16.0
+          targets:
+            ELM327Recon:
+              type: application
+              platform: iOS
+              sources: [ELM327Recon]
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: ru.elm327recon.app
+                  PRODUCT_NAME: ELM327Recon
+                  GENERATE_INFOPLIST_FILE: NO
+                  INFOPLIST_FILE: ELM327Recon/Info.plist
+                  TARGETED_DEVICE_FAMILY: 1
+                  CODE_SIGNING_ALLOWED: NO
+                  CODE_SIGNING_REQUIRED: NO
+          EOF
+
+          cat > ELM327Recon/Info.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleDisplayName</key><string>ELM327 Recon</string>
+          <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+          <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+          <key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleShortVersionString</key><string>0.3</string>
+          <key>CFBundleVersion</key><string>3</string>
+          <key>UILaunchScreen</key><dict/>
+          <key>NSLocalNetworkUsageDescription</key><string>ELM327 local network access</string>
+          </dict></plist>
+          EOF
+
+          cat > ELM327Recon/App.swift <<'EOF'
+          import SwiftUI
+          import Network
+          import UIKit
+
+          let RU = [
+            "off":"\u{041E}\u{0442}\u{043A}\u{043B}\u{044E}\u{0447}\u{0435}\u{043D}\u{043E}",
+            "conn":"\u{041F}\u{043E}\u{0434}\u{043A}\u{043B}\u{044E}\u{0447}\u{0435}\u{043D}\u{043E}",
+            "connecting":"\u{041F}\u{043E}\u{0434}\u{043A}\u{043B}\u{044E}\u{0447}\u{0435}\u{043D}\u{0438}\u{0435}...",
+            "connect":"\u{041F}\u{043E}\u{0434}\u{043A}\u{043B}\u{044E}\u{0447}\u{0438}\u{0442}\u{044C}\u{0441}\u{044F}",
+            "disconnect":"\u{041E}\u{0442}\u{043A}\u{043B}\u{044E}\u{0447}\u{0438}\u{0442}\u{044C}\u{0441}\u{044F}",
+            "status":"\u{0421}\u{0442}\u{0430}\u{0442}\u{0443}\u{0441}",
+            "adapter":"\u{0410}\u{0434}\u{0430}\u{043F}\u{0442}\u{0435}\u{0440}",
+            "protocol":"\u{041F}\u{0440}\u{043E}\u{0442}\u{043E}\u{043A}\u{043E}\u{043B}",
+            "voltage":"\u{041D}\u{0430}\u{043F}\u{0440}\u{044F}\u{0436}\u{0435}\u{043D}\u{0438}\u{0435}",
+            "init":"\u{0418}\u{043D}\u{0438}\u{0446}\u{0438}\u{0430}\u{043B}\u{0438}\u{0437}\u{0438}\u{0440}\u{043E}\u{0432}\u{0430}\u{0442}\u{044C}",
+            "quick":"\u{0411}\u{044B}\u{0441}\u{0442}\u{0440}\u{0430}\u{044F} \u{043F}\u{0440}\u{043E}\u{0432}\u{0435}\u{0440}\u{043A}\u{0430}",
+            "rpm":"\u{041E}\u{0431}\u{043E}\u{0440}\u{043E}\u{0442}\u{044B}",
+            "speed":"\u{0421}\u{043A}\u{043E}\u{0440}\u{043E}\u{0441}\u{0442}\u{044C}",
+            "coolant":"\u{041E}\u{0416}",
+            "read":"\u{041F}\u{0440}\u{043E}\u{0447}\u{0438}\u{0442}\u{0430}\u{0442}\u{044C} \u{043E}\u{0441}\u{043D}\u{043E}\u{0432}\u{043D}\u{044B}\u{0435} \u{043F}\u{0430}\u{0440}\u{0430}\u{043C}\u{0435}\u{0442}\u{0440}\u{044B}",
+            "recon":"\u{0420}\u{0430}\u{0437}\u{0432}\u{0435}\u{0434}\u{043A}\u{0430} \u{0434}\u{0438}\u{0430}\u{0433}\u{043D}\u{043E}\u{0441}\u{0442}\u{0438}\u{0447}\u{0435}\u{0441}\u{043A}\u{043E}\u{0439} \u{0441}\u{0435}\u{0442}\u{0438}",
+            "full":"\u{041F}\u{041E}\u{041B}\u{041D}\u{0410}\u{042F} \u{0414}\u{0418}\u{0410}\u{0413}\u{041D}\u{041E}\u{0421}\u{0422}\u{0418}\u{041A}\u{0410}",
+            "report":"\u{041E}\u{0442}\u{0447}\u{0435}\u{0442}",
+            "copy":"\u{0421}\u{043A}\u{043E}\u{043F}\u{0438}\u{0440}\u{043E}\u{0432}\u{0430}\u{0442}\u{044C} \u{043E}\u{0442}\u{0447}\u{0435}\u{0442}",
+            "log":"\u{041B}\u{043E}\u{0433}",
+            "copied":"\u{041E}\u{0442}\u{0447}\u{0435}\u{0442} \u{0441}\u{043A}\u{043E}\u{043F}\u{0438}\u{0440}\u{043E}\u{0432}\u{0430}\u{043D}"
+          ]
+
+          @main
+          struct AppMain: App {
+              @StateObject var obd = OBD()
+              var body: some Scene { WindowGroup { ContentView().environmentObject(obd) } }
+          }
+
+          @MainActor
+          final class OBD: ObservableObject {
+              struct Hit: Identifiable {
+                  let id = UUID()
+                  let h:String, q:String, r:String
+              }
+
+              enum X: Error { case nc, timeout, gone }
+
+              @Published var host="192.168.0.10", port="35000", state=RU["off"]!
+              @Published var adapter="-", proto="-", volts="-", vin="-", rpm="-", speed="-", temp="-"
+              @Published var progress="", log="", busy=false
+              @Published var hits:[Hit]=[]
+
+              private var c:NWConnection?, buf=Data()
+              private var wait:CheckedContinuation<String,Error>?
+              private var timer:DispatchWorkItem?
+
+              func connect() {
+                  guard let p=UInt16(port), let np=NWEndpoint.Port(rawValue:p) else { return }
+                  disconnect(); state=RU["connecting"]!
+                  let n=NWConnection(host:NWEndpoint.Host(host),port:np,using:.tcp); c=n
+                  n.stateUpdateHandler={ [weak self] s in Task { @MainActor in
+                      guard let self else{return}
+                      switch s {
+                      case .ready: self.state=RU["conn"]!; self.add("TCP \(self.host):\(self.port)"); self.recv()
+                      case .failed(let e): self.state="ERROR"; self.add("TCP ERROR \(e)")
+                      case .cancelled: self.state=RU["off"]!
+                      default: break
+                      }
+                  }}
+                  n.start(queue:DispatchQueue(label:"elm.tcp"))
+              }
+
+              func disconnect() {
+                  timer?.cancel(); timer=nil
+                  if let w=wait { wait=nil; w.resume(throwing:X.gone) }
+                  c?.cancel(); c=nil; buf.removeAll(); state=RU["off"]!
+              }
+
+              private func recv() {
+                  guard let c else{return}
+                  c.receive(minimumIncompleteLength:1,maximumLength:8192){ [weak self] d,_,done,e in
+                      Task { @MainActor in
+                          guard let self else{return}
+                          if let d {
+                              self.buf.append(d)
+                              if let t=String(data:self.buf,encoding:.ascii),t.contains(">"){
+                                  self.buf.removeAll()
+                                  let s=t.replacingOccurrences(of:">",with:"").replacingOccurrences(of:"\r",with:"\n").trimmingCharacters(in:.whitespacesAndNewlines)
+                                  if let w=self.wait { self.timer?.cancel(); self.timer=nil; self.wait=nil; w.resume(returning:s) }
+                              }
+                          }
+                          if done || e != nil {
+                              if let w=self.wait { self.wait=nil; w.resume(throwing:X.gone) }
+                          } else { self.recv() }
+                      }
+                  }
+              }
+
+              func send(_ cmd:String,_ to:Double=5) async throws -> String {
+                  guard let c else{throw X.nc}
+                  while wait != nil { try await Task.sleep(nanoseconds:50_000_000) }
+                  add("-> \(cmd)"); buf.removeAll()
+                  return try await withCheckedThrowingContinuation { k in
+                      wait=k
+                      c.send(content:"\(cmd)\r".data(using:.ascii),completion:.contentProcessed{ _ in })
+                      let w=DispatchWorkItem{ [weak self] in Task { @MainActor in
+                          guard let self,let k=self.wait else{return}; self.wait=nil; self.timer=nil; k.resume(throwing:X.timeout)
+                      }}
+                      timer=w; DispatchQueue.main.asyncAfter(deadline:.now()+to,execute:w)
+                  }
+              }
+
+              func initELM() async {
+                  busy=true; defer{busy=false}
+                  do {
+                      for x in ["ATZ","ATE0","ATL0","ATS0","ATH1","ATSP0","ATCAF1"] { add("<- \(try await send(x,x=="ATZ" ? 8:5))") }
+                      adapter=try await send("ATI"); proto=try await send("ATDP"); volts=try await send("ATRV")
+                  } catch { add("INIT ERROR \(error)") }
+              }
+
+              func basics() async {
+                  busy=true; defer{busy=false}
+                  do {
+                      let a=try await send("010C"); rpm=parse(a,"410C",2){ (($0*256)+$1)/4 } + " rpm"
+                      let b=try await send("010D"); speed=parse1(b,"410D") + " km/h"
+                      let t=try await send("0105"); temp=(Int(parse1(t,"4105")) ?? 40)-40 |> { "\($0) C" }
+                      volts=try await send("ATRV")
+                      vin=try await send("0902",7)
+                  } catch { add("BASIC ERROR \(error)") }
+              }
+
+              func recon() async {
+                  busy=true; hits.removeAll(); progress="START"; defer{busy=false;progress="DONE"}
+                  do {
+                      await initELM()
+                      _=try await send("0100")
+                      let hs=(0x7E0...0x7E7).map{String(format:"%03X",$0)}+(0x7A0...0x7AF).map{String(format:"%03X",$0)}+(0x720...0x72F).map{String(format:"%03X",$0)}
+                      let qs=["22F190","22F18C","22F187"]; var n=0; let total=hs.count*qs.count
+                      for h in hs {
+                          _=try await send("ATSH\(h)")
+                          for q in qs {
+                              n+=1; progress="\(n)/\(total) \(h) \(q)"
+                              do {
+                                  let r=try await send(q,1.6); add("<- [\(h)] \(r)")
+                                  let u=r.uppercased().replacingOccurrences(of:" ",with:"")
+                                  if !u.isEmpty && !u.contains("NODATA") && !u.contains("7F2211") && !u.contains("7F2212") && !u.contains("7F2231") { hits.append(Hit(h:h,q:q,r:r)) }
+                              } catch { add(". \(h) \(q) no response") }
+                          }
+                      }
+                      _=try? await send("ATSH7DF")
+                  } catch { add("RECON ERROR \(error)") }
+              }
+
+              func report()->String {
+                  var a=["ELM327 RECON REPORT","App: 0.3","Adapter: \(adapter)","Protocol: \(proto)","Voltage: \(volts)","VIN: \(vin)","Hits: \(hits.count)"]
+                  for h in hits { a += ["","Header: \(h.h)","Query: \(h.q)","Response:",h.r] }
+                  a += ["","RAW LOG:",log]; return a.joined(separator:"\n")
+              }
+
+              private func hx(_ s:String)->String { s.uppercased().filter{$0.isHexDigit} }
+              private func parse1(_ s:String,_ key:String)->String {
+                  let h=hx(s); guard let r=h.range(of:key) else{return "-"}; let p=r.upperBound
+                  guard h.distance(from:p,to:h.endIndex)>=2 else{return "-"}; let e=h.index(p,offsetBy:2)
+                  return "\(Int(h[p..<e],radix:16) ?? 0)"
+              }
+              private func parse(_ s:String,_ key:String,_ bytes:Int,_ f:(Int,Int)->Int)->String {
+                  let h=hx(s); guard let r=h.range(of:key) else{return "-"}; let p=r.upperBound
+                  guard h.distance(from:p,to:h.endIndex)>=bytes*2 else{return "-"}; let p2=h.index(p,offsetBy:2),p4=h.index(p2,offsetBy:2)
+                  return "\(f(Int(h[p..<p2],radix:16) ?? 0,Int(h[p2..<p4],radix:16) ?? 0))"
+              }
+              private func add(_ s:String){ log += (log.isEmpty ? "" : "\n")+s }
+          }
+
+          infix operator |>
+          func |> <A,B>(a:A,f:(A)->B)->B { f(a) }
+
+          struct ContentView:View {
+              @EnvironmentObject var obd:OBD
+              @State var copied=false
+              var body: some View {
+                  NavigationStack {
+                      Form {
+                          Section("Wi-Fi ELM327"){
+                              TextField("IP",text:$obd.host)
+                              TextField("Port",text:$obd.port).keyboardType(.numberPad)
+                              LabeledContent(RU["status"]!,value:obd.state)
+                              HStack{Button(RU["connect"]!){obd.connect()};Spacer();Button(RU["disconnect"]!){obd.disconnect()}}
+                          }
+                          Section(RU["adapter"]!){
+                              LabeledContent("ELM",value:obd.adapter)
+                              LabeledContent(RU["protocol"]!,value:obd.proto)
+                              LabeledContent(RU["voltage"]!,value:obd.volts)
+                              Button(RU["init"]!){Task{await obd.initELM()}}.disabled(obd.busy)
+                          }
+                          Section(RU["quick"]!){
+                              LabeledContent(RU["rpm"]!,value:obd.rpm)
+                              LabeledContent(RU["speed"]!,value:obd.speed)
+                              LabeledContent(RU["coolant"]!,value:obd.temp)
+                              LabeledContent("VIN",value:obd.vin)
+                              Button(RU["read"]!){Task{await obd.basics()}}.disabled(obd.busy)
+                          }
+                          Section(RU["recon"]!){
+                              Text("READ ONLY: identification requests only. No SecurityAccess, write, reset, programming or DTC clear.").font(.caption)
+                              if !obd.progress.isEmpty { Text(obd.progress).font(.caption.monospaced()) }
+                              Button(RU["full"]!){Task{await obd.recon()}}.disabled(obd.busy)
+                              ForEach(obd.hits){h in VStack(alignment:.leading){Text("\(h.h) \(h.q)").bold();Text(h.r).font(.caption.monospaced()).textSelection(.enabled)}}
+                          }
+                          Section(RU["report"]!){
+                              Button(RU["copy"]!){UIPasteboard.general.string=obd.report();copied=true}
+                          }
+                          Section(RU["log"]!){Text(obd.log).font(.system(size:10,design:.monospaced)).textSelection(.enabled)}
+                      }
+                      .navigationTitle("ELM327 Recon")
+                      .alert(RU["copied"]!,isPresented:$copied){Button("OK",role:.cancel){}}
+                  }
+              }
+          }
+          EOF
+
+      - run: xcodegen generate
+
+      - name: Build
+        run: |
+          xcodebuild -project ELM327Recon.xcodeproj -scheme ELM327Recon -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" clean build
+
+      - name: IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/ELM327Recon.app Payload/
+          zip -qry ELM327Recon-v0.3-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ELM327Recon-v0.3
+          path: ELM327Recon-v0.3-unsigned.ipa
